@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<!--
+  index.html —— MoonLab 中秋手势粒子祝福工坊（主应用）
+  单文件形态：HTML + CSS + JS 全部内联，第三方库通过 importmap 直连本地 vendor/。
+  启动方式：双击 start.bat（本地 http 服务），浏览器访问 http://127.0.0.1:4871
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>MoonLab · 中秋手势粒子祝福</title>
+<link rel="icon" href="data:," />
+
+<!-- 第三方库映射：全部指向本地 vendor/，断网也能跑 -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.js",
+    "@mediapipe/tasks-vision": "./vendor/vision_bundle.mjs"
+  }
+}
+</script>
+
+<style>
+  :root {
+    --gold: #ffcf7a;
+    --gold-dim: #c9a25a;
+    --ink: #070d20;
+    --ink2: #101a3a;
+    --panel: rgba(10, 16, 36, 0.92);
+    --line: rgba(255, 207, 122, 0.22);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #05080f; color: #e8ecf6;
+    font-family: "思源黑体", "Source Han Sans SC", "Noto Sans SC", "微软雅黑", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+  #app { display: flex; height: 100%; width: 100%; }
+
+  /* 舞台：canvas 内部固定 1080×1920，CSS 等比缩放，永不拉伸 */
+  #stage {
+    flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 40%, #0b1230 0%, #05080f 70%);
+    padding: 12px;
+  }
+  #gl {
+    height: calc(100% - 8px); width: auto; aspect-ratio: 1080 / 1920;
+    display: block; border-radius: 10px;
+    box-shadow: 0 0 0 1px rgba(255, 207, 122, 0.16), 0 20px 60px rgba(0, 0, 0, 0.6);
+  }
+
+  /* 右侧控制面板（DOM，不进 canvas，因此不会被录进视频） */
+  #panel {
+    width: 330px; flex: none; padding: 18px 18px 22px;
+    background: var(--panel); border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 10px;
+    transition: opacity .4s ease; overflow-y: auto;
+  }
+  #panel.fade { opacity: 0; pointer-events: none; }
+  #panel h1 { font-size: 17px; margin: 0 0 4px; color: var(--gold); letter-spacing: 1px; }
+  #panel h1 span { display: block; font-size: 11px; color: #8b96b4; letter-spacing: 2px; font-weight: 400; margin-top: 3px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: #93a0bd; }
+  .row b { color: #fff; font-size: 13px; font-weight: 600; }
+  .sec { height: 1px; background: var(--line); margin: 6px 0; }
+  .field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: #93a0bd; }
+  .field input {
+    background: #0a1128;
+    border: 1px solid var(--line); color: #fff; border-radius: 6px;
+    padding: 9px 10px; font-size: 14px; font-family: inherit; outline: none;
+  }
+  .field input:focus { border-color: var(--gold); }
+  button {
+    font-family: inherit; cursor: pointer; border: none; border-radius: 8px;
+    padding: 12px; font-size: 14px; font-weight: 700; letter-spacing: 1px;
+  }
+  #btnRec { background: linear-gradient(135deg, #ffcf7a, #e0a24a); color: #2a1a02; }
+  #btnRec:hover { filter: brightness(1.08); }
+  #btnRec:disabled { opacity: .45; cursor: not-allowed; }
+  .chk { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #93a0bd; }
+  .tip { font-size: 11px; line-height: 1.7; color: #78859f; margin: 4px 0 0; }
+  .tip kbd { background: #1a2340; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; color: var(--gold); }
+
+  /* 摄像头源：必须留在文档里才能解码，视觉上移出屏幕 */
+  #cam { position: fixed; left: -10000px; top: 0; width: 2px; height: 2px; opacity: 0; }
+
+  /* 覆盖层：启动 / 错误 / 预览 */
+  .overlay {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(5, 8, 15, .9); backdrop-filter: blur(4px); z-index: 50;
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 26px 30px; max-width: 560px; text-align: center;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, .6);
+  }
+  .card h2 { margin: 0 0 10px; color: var(--gold); font-size: 19px; }
+  .card p { font-size: 13px; line-height: 1.85; color: #b8c2da; margin: 6px 0; }
+  .card ul { text-align: left; font-size: 12px; color: #b8c2da; line-height: 1.9; padding-left: 20px; }
+  .card code { background: #0a1128; padding: 2px 6px; border-radius: 4px; color: var(--gold); }
+  .card video { width: 260px; border-radius: 10px; margin: 12px 0 6px; background: #000; }
+  .btnrow { display: flex; gap: 10px; justify-content: center; margin-top: 14px; }
+  .btnrow button { padding: 10px 20px; font-size: 13px; }
+  .ghost { background: transparent; border: 1px solid var(--line); color: var(--gold); }
+  /* 面板折叠开关：仅手机端出现，默认收起，把画面留给舞台 */
+  #btnToggle { display: none; background: #121a33; border: 1px solid var(--line); color: var(--gold); font-size: 12px; padding: 8px 10px; }
+  #panel.collapsed .row,
+  #panel.collapsed .sec,
+  #panel.collapsed .field,
+  #panel.collapsed .chk,
+  #panel.collapsed .tip { display: none; }
+
+  /* 大文件下载进度条（wasm 与手势模型共约 16MB，公网首访需要） */
+  .bar { height: 6px; width: 100%; background: #131c38; border-radius: 999px; overflow: hidden; margin-top: 10px; }
+  .bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #ffcf7a, #e0a24a); transition: width .2s linear; }
+  #loadTip { font-size: 12px; color: var(--gold-dim); margin-top: 8px; min-height: 18px; }
+  .privacy { font-size: 11px; color: #6f7c99; margin-top: 10px; line-height: 1.6; }
+
+  .hidden { display: none !important; }
+
+  /* —— 手机 / 竖屏平板：上下布局，舞台优先，控制台变底部面板 —— */
+  @media (max-width: 860px), (hover: none) and (max-width: 1024px) {
+    #app { flex-direction: column; }
+    #stage { flex: 1 1 auto; min-height: 0; padding: 8px 8px 4px; }
+    #gl { height: 100%; width: auto; max-width: 100%; border-radius: 8px; }
+    #panel {
+      width: 100%; flex: none; max-height: 52%;
+      border-left: none; border-top: 1px solid var(--line);
+      padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+      gap: 8px;
+    }
+    #panel h1 { font-size: 15px; }
+    #btnToggle { display: block; }
+    .row { font-size: 13px; }
+    .row b { font-size: 14px; }
+    .field input { font-size: 16px; padding: 11px 12px; }
+    button { padding: 14px 12px; min-height: 46px; touch-action: manipulation; }
+    #btnRec { font-size: 15px; }
+    .tip { font-size: 12px; }
+    .card { max-width: 92vw; padding: 20px 18px; }
+    .card video { width: 100%; max-width: 320px; }
+    .btnrow { flex-wrap: wrap; }
+    .btnrow button { min-height: 46px; padding: 12px 18px; }
+  }
+  /* 横屏手机：面板再压矮一点，保证画面看得见 */
+  @media (max-height: 520px) { #panel { max-height: 40%; } }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div id="stage"><canvas id="gl" width="1080" height="1920"></canvas></div>
+
+  <aside id="panel">
+    <h1>MoonLab<span>中秋手势粒子祝福</span></h1>
+    <button id="btnToggle" type="button">展开控制台</button>
+    <div class="row"><span>当前手势</span><b id="hGesture">未检测到</b></div>
+    <div class="row"><span>识别置信度</span><b id="hScore">—</b></div>
+    <div class="row"><span>帧率 FPS</span><b id="hFps">—</b></div>
+    <div class="row"><span>当前造型</span><b id="hShape">1/4 桂花星河</b></div>
+    <div class="row"><span>下一个造型</span><b id="hNext">满月</b></div>
+    <div class="row"><span>粒子数</span><b id="hCount">—</b></div>
+    <div class="sec"></div>
+    <label class="field"><span>主文案</span><input id="inMain" value="中秋快乐" maxlength="20" /></label>
+    <label class="field"><span>落款（署名）</span><input id="inSign" placeholder="请输入署名" maxlength="14" /></label>
+    <button id="btnRec">开始录制</button>
+    <label class="chk"><input type="checkbox" id="chkPip" checked /> 显示右下角画中画</label>
+    <p class="tip">
+      张开五指 → 粒子炸散 ｜ 握拳 → 聚合 ｜ 捏合慢移 → 旋转<br />
+      捏合向左/右甩手 → 上一 / 下一个造型<br />
+      录制中按 <kbd>Esc</kbd> 停止，倒计时中按 <kbd>Esc</kbd> 取消。
+    </p>
+  </aside>
+</div>
+
+<video id="cam" playsinline autoplay muted></video>
+
+<!-- 启动 / 授权层 -->
+<div id="boot" class="overlay">
+  <div class="card">
+    <h2>开启摄像头，开始创作</h2>
+    <p>本工具完全在本地运行：摄像头画面只在你自己的设备上处理，<b>不上传、不写盘</b>。</p>
+    <p>请用 <b>Chrome</b> 打开，并在弹窗中允许使用摄像头。</p>
+    <div class="btnrow"><button id="btnStart" style="background:linear-gradient(135deg,#ffcf7a,#e0a24a);color:#2a1a02;">启用摄像头</button></div>
+    <div id="loadWrap" class="hidden">
+      <div class="bar"><i id="loadBar"></i></div>
+      <div id="loadTip"></div>
+    </div>
+    <p id="bootErr" style="color:#ff9a9a;margin-top:12px;"></p>
+    <p class="privacy">首次使用需下载约 16MB 的手势识别文件，之后浏览器会缓存，第二次打开几乎秒开。</p>
+  </div>
+</div>
+
+<!-- 致命错误层（vendor 缺失 / 浏览器不支持） -->
+<div id="fatal" class="overlay hidden">
+  <div class="card">
+    <h2 id="fatalTitle">无法启动</h2>
+    <div id="fatalBody"></div>
+  </div>
+</div>
+
+<!-- 录制预览层 -->
+<div id="preview" class="overlay hidden">
+  <div class="card">
+    <h2>录制完成</h2>
+    <video id="pvVideo" controls playsinline></video>
+    <p id="pvInfo"></p>
+    <div class="btnrow">
+      <button id="btnSave" style="background:linear-gradient(135deg,#ffcf7a,#e0a24a);color:#2a1a02;">保存到本地</button>
+      <button id="btnAgain" class="ghost">重录</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+/* ============================================================================
+ * 0. 全局配置：所有可调参数集中在此，禁止散落各处
+ * ==========================================================================*/
+const CONFIG = {
+  /* —— 画面与渲染 —— */
+  WIDTH: 1080,                 // canvas 内部宽（固定，不随窗口变化）
+  HEIGHT: 1920,                // canvas 内部高（竖屏）
+  BG_TOP: '#070d20',           // 背景渐变顶色
+  BG_BOTTOM: '#101a3a',        // 背景渐变底色
+
+  /* —— 粒子 —— */
+  PARTICLES_HIGH: 30000,       // 性能达标时的造型粒子数（桌面）
+  PARTICLES_LOW: 15000,        // 性能不足时的造型粒子数（桌面）
+  MOBILE_HIGH: 12000,          // 手机 / 平板：GPU 与内存都 weaker，基准直接降下来
+  MOBILE_LOW: 6000,
+  AMBIENT_RATIO: 0.2,          // 桂花星河氛围层粒子 = 造型粒子 × 该比例
+  DEGRADE_STEPS: [1.0, 0.6, 0.4], // 帧率不足时逐级降档
+  FPS_FLOOR: 45,               // 低于该帧率触发降级
+  FPS_DEGRADE_WINDOW: 2000,    // 连续低于阈值多久后降级（毫秒）
+  BENCH_MS: 3000,              // 首次压力测试时长（毫秒）
+  BENCH_PASS_FPS: 50,          // 压力测试达标帧率
+
+  /* —— 造型 —— */
+  SHAPES: ['桂花星河', '满月', '玉兔', '祝福文字'],
+  LOCK_LAST_SHAPE_WHILE_RECORD: true, // 录制中锁住最后一个造型不被自动推进
+  SAMPLING: { W: 512, H: 910, ALPHA_MIN: 128, GRID_X: 24, GRID_Y: 42 },
+  STAGE_H: 1500,               // 造型在世界坐标中的高度（1 单位 ≈ 1 像素）
+  MOON_RADIUS_RATIO: 0.46,     // 满月半径 / 采样画布宽
+  RABBIT_WIDTH_RATIO: 0.80,    // 玉兔宽度 / 采样画布宽
+  TEXT_WIDTH_RATIO: 0.78,      // 主文案宽度 / 采样画布宽
+  SIGN_RATIO: 0.28,            // 落款字号 / 主文案字号
+  FONT_STACK: '"思源黑体","Source Han Sans SC","Noto Sans SC","微软雅黑","Microsoft YaHei",sans-serif',
+  TEXT_DEBOUNCE: 300,          // 文案输入防抖（毫秒）
+  Z_SIGMA: { 0: 220, 1: 14, 2: 26, 3: 18 }, // 各造型 z 方向厚度（高斯标准差）
+
+  /* —— 粒子物理 —— */
+  K: { focus: 0.11, idle: 0.075, rotate: 0.085 },  // spring 系数（聚合越紧 k 越大）
+  NOISE: { idle: 0.55, focus: 0.22, rotate: 0.5 }, // 低频噪声幅度
+  SCATTER_IMPULSE: 22,         // 炸散径向初速度
+  SCATTER_DAMP: 0.94,          // 炸散速度阻尼
+  SCATTER_NOISE: 5.5,          // 炸散状态噪声幅度
+  ROTATE_SPEED: 0.01,          // 捏合拖动 → rotation.y += dx * 该系数
+  AMBIENT_FALL: 0.42,          // 桂花飘落速度
+
+  /* —— 手势 —— */
+  GESTURE: {
+    OPEN: 1.6,                 // openness > 该值判"张开五指"
+    FIST: 0.9,                 // openness < 该值判"握拳"
+    PINCH: 0.35,               // pinch < 该值判"捏合"
+    SCORE_MIN: 0.5,            // 置信度低于该值本帧沿用上一帧状态
+    HOLD_MS: 400,              // 状态持续多久才真正切换（防抖）
+    SWIPE_VX: 0.02,            // 甩手速度阈值（归一化坐标 / 检测帧）
+    SWIPE_COOLDOWN: 800,       // 甩手切换冷却（毫秒）
+    IDLE_MS: 12000,            // 多久无有效手势自动推进造型
+    DETECT_INTERVAL: 33,       // 手势检测间隔（毫秒）
+    VX_SMOOTH: 0.5,            // 掌心速度平滑系数
+  },
+  USE_GPU_DELEGATE: false,     // MediaPipe 推理后端：false = CPU（更稳，不与 WebGL 抢上下文）
+
+  /* —— 画中画 —— */
+  PIP: { DIAMETER: 260, MARGIN: 40, ENABLED: true },
+
+  /* —— 录制 —— */
+  RECORD: {
+    FPS: 30,
+    MAX_MS: 60000,             // 录制上限
+    BITRATE: 12000000,
+    HUD_FADE: 400,             // HUD 淡出时长（毫秒）
+    COUNTDOWN: [3, 2, 1],
+    COUNTDOWN_STEP: 1000,      // 每个数字停留时长
+  },
+  MIME_CHAIN: [
+    'video/mp4;codecs=avc1.42E01E',
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm',
+  ],
+
+  /* —— 第三方库（本地化） —— */
+  VENDOR_FILES: [
+    'vendor/three.module.js',
+    'vendor/vision_bundle.mjs',
+    'vendor/vision_wasm_internal.js',
+    'vendor/vision_wasm_internal.wasm',
+    'vendor/hand_landmarker.task',
+  ],
+  USE_CDN_FALLBACK: false,     // 默认关闭：断网也要能跑
+  CDN: {
+    three: 'https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js',
+    vision: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs',
+    wasm: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm',
+    model: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+  },
+
+  /* 玉兔轮廓：头 / 双耳 / 身体 / 尾巴一体的闭合 SVG path。
+     可替换为任意 SVG path 字符串（设计框为 400×400，兔子实际宽约 307 单位）。 */
+  RABBIT_PATH: 'M103.1 74A19 60 -6 1 0 140.9 70A19 60 -6 1 0 103.1 74Z'   // 左耳
+    + 'M164.2 67.2A18 64 9 1 0 199.8 72.8A18 64 9 1 0 164.2 67.2Z'  // 右耳
+    + 'M78 150A62 56 0 1 0 202 150A62 56 0 1 0 78 150Z'             // 头
+    + 'M62 168A30 25 0 1 0 122 168A30 25 0 1 0 62 168Z'             // 口鼻
+    + 'M128 250A100 90 0 1 0 328 250A100 90 0 1 0 128 250Z'         // 身体
+    + 'M98 232A70 78 0 1 0 238 232A70 78 0 1 0 98 232Z'             // 胸
+    + 'M213 268A62 62 0 1 0 337 268A62 62 0 1 0 213 268Z'           // 后臀
+    + 'M230 330A58 26 0 1 0 346 330A58 26 0 1 0 230 330Z'           // 后脚
+    + 'M133 320A32 22 0 1 0 197 320A32 22 0 1 0 133 320Z'           // 前爪
+    + 'M321 250A24 24 0 1 0 369 250A24 24 0 1 0 321 250Z',          // 尾巴
+};
+
+/* ============================================================================
+ * 1. 基础工具
+ * ==========================================================================*/
+const $ = (id) => document.getElementById(id);
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const pad2 = (n) => String(n).padStart(2, '0');
+const STAGE_W = CONFIG.STAGE_H * (CONFIG.SAMPLING.W / CONFIG.SAMPLING.H);
+
+function fatal(title, htmlBody) {
+  $('fatalTitle').textContent = title;
+  $('fatalBody').innerHTML = htmlBody;
+  $('fatal').classList.remove('hidden');
+  $('boot').classList.add('hidden');
+}
+
+/* ============================================================================
+ * 2. 校验本地第三方库（缺文件给出中文提示，不去静默走 CDN）
+ * ==========================================================================*/
+async function checkVendor() {
+  const missing = [];
+  for (const f of CONFIG.VENDOR_FILES) {
+    try {
+      const r = await fetch(f, { method: 'HEAD' });
+      if (!r.ok) missing.push(f);
+    } catch (e) { missing.push(f); }
+  }
+  return missing;
+}
+
+/* ============================================================================
+ * 3. 加载三方库（本地优先，CDN 仅作可选回退）
+ * ==========================================================================*/
+/* —— 设备判定：手机 / 平板走降档与底部面板；iOS 单独提示录制限制 —— */
+const IS_TOUCH = window.matchMedia('(hover: none) and (pointer: coarse)').matches;
+const IS_MOBILE = IS_TOUCH || Math.min(window.innerWidth, window.innerHeight) < 860;
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+let THREE, HandLandmarker, FilesetResolver;
+async function loadLibs(useCdn) {
+  const threeSrc = useCdn ? CONFIG.CDN.three : 'three';
+  const visionSrc = useCdn ? CONFIG.CDN.vision : '@mediapipe/tasks-vision';
+  THREE = await import(threeSrc);
+  const vision = await import(visionSrc);
+  HandLandmarker = vision.HandLandmarker;
+  FilesetResolver = vision.FilesetResolver;
+}
+
+/* ============================================================================
+ * 4. 造型采样：在 512×910 离屏画布上绘制造型 → 逐像素加权采样 → 3D 目标点
+ * ==========================================================================*/
+const Sampling = (() => {
+  const W = CONFIG.SAMPLING.W, H = CONFIG.SAMPLING.H;
+  let canvas, ctx;
+  if (typeof OffscreenCanvas !== 'undefined') canvas = new OffscreenCanvas(W, H);
+  else { canvas = document.createElement('canvas'); canvas.width = W; canvas.height = H; }
+  ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  // 高斯随机（Box-Muller），用于 z 方向薄层
+  function gauss() {
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
+  function clear() { ctx.clearRect(0, 0, W, H); }
+
+  /* —— 满月：实心圆，中心密度高、边缘密度低 —— */
+  function drawMoon() {
+    clear();
+    const cx = W / 2, cy = H / 2, r = W * CONFIG.MOON_RADIUS_RATIO;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.55, 'rgba(255,255,255,0.96)');
+    g.addColorStop(1, 'rgba(255,255,255,0.62)'); // 边缘 alpha 低 → 采样概率低，形成密度梯度
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // 月面质感：几块淡淡的暗斑（降低局部 alpha，制造疏密）
+    ctx.globalCompositeOperation = 'destination-out';
+    const craters = [[0.42, 0.40, 0.10], [0.60, 0.55, 0.07], [0.48, 0.62, 0.05], [0.58, 0.36, 0.04]];
+    for (const [rx, ry, rr] of craters) {
+      const gx = W * rx, gy = H * ry, gr = W * rr;
+      const gg = ctx.createRadialGradient(gx, gy, 0, gx, gy, gr);
+      gg.addColorStop(0, 'rgba(0,0,0,0.55)');
+      gg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = gg;
+      ctx.beginPath(); ctx.arc(gx, gy, gr, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /* —— 玉兔：内置 SVG path，可替换 —— */
+  function drawRabbit() {
+    clear();
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+    const s = (W * CONFIG.RABBIT_WIDTH_RATIO) / 307; // 307 = 设计框内兔子实际宽度
+    ctx.scale(s, s);
+    ctx.translate(-210, -180); // 设计框内兔子重心大致在 (210,180)
+    ctx.fillStyle = '#ffffff';
+    ctx.fill(new Path2D(CONFIG.RABBIT_PATH));
+    ctx.restore();
+  }
+
+  /* —— 文字：主文案自适应字号居中 + 落款右对齐自动补「—— 」 —— */
+  function drawText(main, sign) {
+    clear();
+    ctx.save();
+    ctx.fillStyle = '#ffffff';
+    ctx.textBaseline = 'middle';
+
+    const targetW = W * CONFIG.TEXT_WIDTH_RATIO;
+    const chars = [...(main || '中秋快乐')];
+    const maxBlockH = H * 0.60; // 主文案块最大高度，给落款留空间
+
+    // 在 1~3 行中挑出让字号最大的行数方案（0.96 为中文整字宽度的安全余量）
+    let size = 10, planLines = 1;
+    for (let lines = 1; lines <= 3; lines++) {
+      const s = Math.min((targetW * 0.96) / Math.ceil(chars.length / lines), maxBlockH / (lines * 1.24));
+      if (s > size) { size = s; planLines = lines; }
+    }
+
+    // 按该字号实测宽度断行
+    const breakLines = (fontSize) => {
+      ctx.font = `700 ${fontSize}px ${CONFIG.FONT_STACK}`;
+      const ls = [];
+      let cur = '';
+      for (const ch of chars) {
+        const test = cur + ch;
+        if (cur && ctx.measureText(test).width > targetW * 0.98) { ls.push(cur); cur = ch; }
+        else cur = test;
+      }
+      if (cur) ls.push(cur);
+      return ls;
+    };
+
+    let lines = breakLines(size);
+    if (lines.length > planLines) { // 实际行数超出预算（混排宽度不均）→ 按实际行数缩小重排
+      size = Math.min(size, maxBlockH / (lines.length * 1.24));
+      lines = breakLines(size);
+    }
+
+    const signText = (sign || '').trim() ? '—— ' + sign.trim() : '';
+    const signSize = size * CONFIG.SIGN_RATIO;
+    const lineH = size * 1.24;
+    const blockH = lines.length * lineH + (signText ? signSize * 2.6 : 0);
+    let y = H / 2 - blockH / 2 + lineH / 2;
+
+    ctx.textAlign = 'center';
+    for (const line of lines) { ctx.fillText(line, W / 2, y); y += lineH; }
+
+    if (signText) {
+      y += signSize * 0.6;
+      ctx.font = `500 ${signSize}px ${CONFIG.FONT_STACK}`;
+      ctx.textAlign = 'right';
+      ctx.fillText(signText, W / 2 + targetW / 2, y);
+    }
+    ctx.restore();
+  }
+
+  function wrapLines(text, maxW, probeSize) { // （保留备用）中文按宽度断行：逐字累加
+    const keep = `700 ${probeSize}px ${CONFIG.FONT_STACK}`;
+    ctx.font = keep;
+    const lines = [];
+    let cur = '';
+    for (const ch of String(text)) {
+      const test = cur + ch;
+      if (ctx.measureText(test).width > maxW && cur) { lines.push(cur); cur = ch; }
+      else cur = test;
+    }
+    if (cur) lines.push(cur);
+    return lines.length ? lines : ['　'];
+  }
+
+  /* —— 加权采样：网格分桶保证空间均匀，邻域密度低处（耳朵、笔画末端）加权 —— */
+  function sample(n, sigma) {
+    const img = ctx.getImageData(0, 0, W, H).data;
+    const GX = CONFIG.SAMPLING.GRID_X, GY = CONFIG.SAMPLING.GRID_Y;
+    const gw = W / GX, gh = H / GY;
+    const AM = CONFIG.SAMPLING.ALPHA_MIN;
+
+    // 第一遍：统计每个网格桶的候选数与权重和
+    const cnt = new Int32Array(GX * GY);
+    const wsum = new Float64Array(GX * GY);
+    const cellOf = (x, y) => Math.min(GY - 1, (y / gh) | 0) * GX + Math.min(GX - 1, (x / gw) | 0);
+
+    const alphaAt = (x, y) => img[((y * W + x) << 2) + 3];
+    // 邻域填充度：周围 8 点中 alpha 达标的个数 → 越少说明越细（耳朵、笔画末端）
+    const fillAt = (x, y) => {
+      let c = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+        if (alphaAt(nx, ny) > AM) c++;
+      }
+      return c;
+    };
+
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const a = alphaAt(x, y);
+        if (a <= AM) continue;
+        const w = (a / 255) * (1 + (1 - fillAt(x, y) / 9) * 1.6); // 细部加权
+        const c = cellOf(x, y);
+        cnt[c]++; wsum[c] += w;
+      }
+    }
+
+    // 前缀和 → CSR 候选池
+    const start = new Int32Array(GX * GY + 1);
+    for (let c = 0; c < GX * GY; c++) start[c + 1] = start[c] + cnt[c];
+    const total = start[GX * GY];
+    if (total === 0) return null;
+    const pool = new Int32Array(total);
+    const cursor = Int32Array.from(start.subarray(0, GX * GY));
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (alphaAt(x, y) <= AM) continue;
+      pool[cursor[cellOf(x, y)]++] = y * W + x;
+    }
+
+    // 按桶权重启用配额，桶内随机取点
+    let Wtot = 0; for (let c = 0; c < wsum.length; c++) Wtot += wsum[c];
+    const out = new Float32Array(n * 3);
+    let k = 0;
+    for (let c = 0; c < GX * GY && k < n; c++) {
+      const have = start[c + 1] - start[c];
+      if (have === 0 || wsum[c] === 0) continue;
+      let quota = Math.round((n * wsum[c]) / Wtot);
+      if (k + quota > n) quota = n - k;
+      for (let q = 0; q < quota; q++) {
+        const p = pool[start[c] + ((Math.random() * have) | 0)];
+        const px = p % W, py = (p / W) | 0;
+        out[k * 3] = (px / W - 0.5) * STAGE_W + (Math.random() - 0.5) * 1.6;
+        out[k * 3 + 1] = (0.5 - py / H) * CONFIG.STAGE_H + (Math.random() - 0.5) * 1.6;
+        out[k * 3 + 2] = gauss() * sigma;
+        k++;
+      }
+    }
+    // 配额取整可能有零头，用随机桶补齐
+    while (k < n) {
+      const c = (Math.random() * GX * GY) | 0;
+      const have = start[c + 1] - start[c];
+      if (!have) continue;
+      const p = pool[start[c] + ((Math.random() * have) | 0)];
+      out[k * 3] = ((p % W) / W - 0.5) * STAGE_W;
+      out[k * 3 + 1] = (0.5 - ((p / W) | 0) / H) * CONFIG.STAGE_H;
+      out[k * 3 + 2] = gauss() * sigma;
+      k++;
+    }
+    // 打乱：降级只画前 n 个粒子时，仍能保持造型完整
+    for (let i = n - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      for (let t = 0; t < 3; t++) {
+        const tmp = out[i * 3 + t]; out[i * 3 + t] = out[j * 3 + t]; out[j * 3 + t] = tmp;
+      }
+    }
+    return out;
+  }
+
+  return { drawMoon, drawRabbit, drawText, sample, gauss };
+})();
+
+/* ============================================================================
+ * 5. 主程序
+ * ==========================================================================*/
+const canvas = $('gl');
+let renderer, scene, camera, bgScene, bgCam, pipScene, hudScene, orthoCam;
+let points, geometry, material;
+let positions, targets, vels, seeds, sizes, hueOff, lumOff;
+let N_SHAPE, N_AMB, N_TOTAL;
+let degradeStep = 0;   // 运行期降级档位（对应 CONFIG.DEGRADE_STEPS）
+let baseScale = 1;     // 压力测试结论：1 = 高档 30000，0.5 = 低档 15000
+let driftYaw = 0;      // 捏合旋转累加出的整体偏航角
+let autoYaw = 0;       // 无手势时的自动摆动角（平滑过渡，避免跳变）
+
+// 当前实际绘制的粒子数
+function drawCount() {
+  return N_AMB + Math.floor(N_SHAPE * baseScale * CONFIG.DEGRADE_STEPS[degradeStep]);
+}
+let mainText = '中秋快乐', signText = '';
+
+const state = {
+  shapeIndex: 0,
+  gesture: 'NONE',        // NONE / OPEN / FIST / PINCH
+  gestureScore: 0,
+  pending: 'NONE', pendingSince: 0,
+  lastGestureAt: performance.now(),
+  phase: 'idle',          // idle / countdown / recording / preview
+  lastShapeAt: 0,
+};
+
+// 渲染相关的平滑量
+const vis = { cold: 0, bright: 1, targetCold: 0, targetBright: 1 };
+
+/* —— 着色器 —— */
+const VERT = `
+attribute float aSize;
+attribute float aHue;
+attribute float aLum;
+uniform float uSize;
+varying float vHue;
+varying float vLum;
+void main() {
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = aSize * uSize * (900.0 / max(1.0, -mv.z)); // 大小随相机距离衰减
+  vHue = aHue; vLum = aLum;
+}`;
+
+const FRAG = `
+precision highp float;
+uniform float uCold;    // 0=暖金 1=冷色（炸散时升高）
+uniform float uBright;  // 整体亮度（聚合时提亮）
+varying float vHue;
+varying float vLum;
+vec3 hsl2rgb(vec3 c) {
+  vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+  return c.z + c.y * (rgb - 0.5) * (1.0 - abs(2.0 * c.z - 1.0));
+}
+void main() {
+  vec2 cc = gl_PointCoord - vec2(0.5);
+  float d = length(cc);
+  if (d > 0.5) discard;
+  float core = smoothstep(0.5, 0.0, d);
+  float a = pow(core, 1.8);
+  float glow = exp(-d * 7.0) * 0.55;      // 轻微辉光
+  float h = mix(vHue, 0.55, uCold);        // 炸散时色相转冷
+  float s = mix(0.78, 0.38, uCold);        // 炸散时降饱和
+  float l = clamp(vLum * uBright, 0.0, 1.0);
+  vec3 col = hsl2rgb(vec3(h, s, l));
+  float alpha = (a + glow) * mix(1.0, 0.72, uCold);
+  gl_FragColor = vec4(col * (a + glow), alpha);
+}`;
+
+/* —— 初始化 Three.js —— */
+function initThree() {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: false });
+  renderer.setPixelRatio(1);
+  renderer.setSize(CONFIG.WIDTH, CONFIG.HEIGHT, false); // 只改内部分辨率，不改 CSS
+  renderer.autoClear = false;
+
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(45, CONFIG.WIDTH / CONFIG.HEIGHT, 1, 8000);
+  camera.position.z = (CONFIG.HEIGHT / 2) / Math.tan((camera.fov / 2) * Math.PI / 180);
+
+  // 背景：深蓝竖向渐变（着色器实现，不用贴图）
+  bgScene = new THREE.Scene();
+  bgCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const bgMat = new THREE.ShaderMaterial({
+    uniforms: { uTop: { value: new THREE.Color(CONFIG.BG_TOP) }, uBottom: { value: new THREE.Color(CONFIG.BG_BOTTOM) } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: 'varying vec2 vUv; uniform vec3 uTop; uniform vec3 uBottom; void main(){ gl_FragColor = vec4(mix(uBottom, uTop, vUv.y), 1.0); }',
+    depthTest: false, depthWrite: false,
+  });
+  bgScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat));
+
+  // 画中画 / 倒计时用的正交相机（像素坐标系：左下 -540,-960 → 右上 540,960）
+  orthoCam = new THREE.OrthographicCamera(-CONFIG.WIDTH / 2, CONFIG.WIDTH / 2, CONFIG.HEIGHT / 2, -CONFIG.HEIGHT / 2, -1000, 1000);
+  pipScene = new THREE.Scene();
+  hudScene = new THREE.Scene();
+}
+
+/* —— 建立粒子 —— */
+function buildParticles(shapeCount) {
+  N_SHAPE = shapeCount;
+  N_AMB = Math.round(shapeCount * CONFIG.AMBIENT_RATIO);
+  N_TOTAL = N_SHAPE + N_AMB;
+
+  positions = new Float32Array(N_TOTAL * 3);
+  targets = new Float32Array(N_TOTAL * 3);
+  vels = new Float32Array(N_TOTAL * 3);
+  seeds = new Float32Array(N_TOTAL * 3);
+  sizes = new Float32Array(N_TOTAL);
+  hueOff = new Float32Array(N_TOTAL);
+  lumOff = new Float32Array(N_TOTAL);
+
+  for (let i = 0; i < N_TOTAL; i++) {
+    const amb = i < N_AMB;
+    // 初始位置：散布在整个舞台，入场时自然聚拢
+    positions[i * 3] = (Math.random() - 0.5) * STAGE_W * 1.6;
+    positions[i * 3 + 1] = (Math.random() - 0.5) * CONFIG.STAGE_H * 1.15;
+    positions[i * 3 + 2] = (Math.random() - 0.5) * 400;
+    for (let t = 0; t < 3; t++) seeds[i * 3 + t] = Math.random() * Math.PI * 2;
+    sizes[i] = amb ? 0.7 + Math.random() * 0.9 : 1.0 + Math.random() * 1.25;
+    hueOff[i] = 0.10 + Math.random() * 0.03;              // 暖金 HSL 色相 0.10~0.13
+    lumOff[i] = amb ? 0.42 + Math.random() * 0.18 : 0.6 + Math.random() * 0.25;
+  }
+
+  geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+  geometry.setAttribute('aHue', new THREE.BufferAttribute(hueOff, 1));
+  geometry.setAttribute('aLum', new THREE.BufferAttribute(lumOff, 1));
+  geometry.setDrawRange(0, N_TOTAL);
+  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 5000);
+
+  material = new THREE.ShaderMaterial({
+    uniforms: { uSize: { value: 6.2 }, uCold: { value: 0 }, uBright: { value: 1 } },
+    vertexShader: VERT, fragmentShader: FRAG,
+    transparent: true, depthWrite: false, depthTest: false,
+    blending: THREE.AdditiveBlending,
+  });
+
+  points = new THREE.Points(geometry, material);
+  scene.add(points);
+}
+
+/* —— 造型目标点分配 —— */
+function assignTargets() {
+  const idx = state.shapeIndex;
+  const shape = CONFIG.SHAPES[idx];
+  if (idx === 0) {
+    // 桂花星河：程序化分布（不做采样），给一次向外冲量，视觉上是"散作星河"
+    scatterImpulse();
+    return;
+  }
+  if (shape === '满月') Sampling.drawMoon();
+  else if (shape === '玉兔') Sampling.drawRabbit();
+  else Sampling.drawText(mainText, signText);
+
+  const pts = Sampling.sample(N_SHAPE, CONFIG.Z_SIGMA[idx]);
+  if (!pts) { scatterImpulse(); return; }
+  targets.set(pts, N_AMB * 3);
+}
+
+// 炸散：给造型粒子施加径向初速度
+function scatterImpulse() {
+  for (let i = N_AMB; i < N_TOTAL; i++) {
+    const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+    const len = Math.hypot(x, y, z) || 1;
+    const imp = CONFIG.SCATTER_IMPULSE * (0.5 + Math.random());
+    vels[i * 3] += (x / len) * imp + (Math.random() - 0.5) * 6;
+    vels[i * 3 + 1] += (y / len) * imp + (Math.random() - 0.5) * 6;
+    vels[i * 3 + 2] += (z / len) * imp * 0.5 + (Math.random() - 0.5) * 6;
+  }
+}
+
+function gotoShape(delta) {
+  const n = CONFIG.SHAPES.length;
+  state.shapeIndex = ((state.shapeIndex + delta) % n + n) % n;
+  assignTargets();
+  updateHud();
+}
+
+/* —— 每帧更新粒子 —— */
+function updateParticles(dt, t) {
+  const G = CONFIG.GESTURE;
+  const isAmbientShape = state.shapeIndex === 0;
+  const lockFreeze = state.shapeIndex === 3; // 祝福文字：定格收尾，不散开
+  const g = state.gesture;
+  const scattering = g === 'OPEN' && !lockFreeze && !isAmbientShape;
+
+  const k = scattering ? CONFIG.K.idle
+    : g === 'FIST' ? CONFIG.K.focus
+      : g === 'PINCH' ? CONFIG.K.rotate : CONFIG.K.idle;
+
+  // 颜色/亮度目标：聚合提亮偏暖，炸散降饱和转冷
+  vis.targetCold = scattering ? 0.8 : 0;
+  vis.targetBright = g === 'FIST' ? 1.28 : g === 'PINCH' ? 1.12 : 1.0;
+  vis.cold = lerp(vis.cold, vis.targetCold, 0.06);
+  vis.bright = lerp(vis.bright, vis.targetBright, 0.06);
+  material.uniforms.uCold.value = vis.cold;
+  material.uniforms.uBright.value = vis.bright;
+
+  const noiseAmp = scattering ? CONFIG.SCATTER_NOISE
+    : g === 'FIST' ? CONFIG.NOISE.focus
+      : g === 'PINCH' ? CONFIG.NOISE.rotate : CONFIG.NOISE.idle;
+
+  const dt60 = clamp(dt / 16.67, 0.2, 3);
+  const halfH = CONFIG.STAGE_H * 0.62;
+
+  for (let i = 0; i < N_TOTAL; i++) {
+    const i3 = i * 3;
+    const amb = isAmbientShape || i < N_AMB;
+
+    if (amb) {
+      // 桂花星河氛围层：缓慢飘落 + 正弦横摆，落到底部从顶部循环
+      positions[i3] += Math.sin(t * 0.00055 + seeds[i3]) * 0.5 * dt60;
+      positions[i3 + 1] -= (CONFIG.AMBIENT_FALL + seeds[i3 + 2] * 0.006) * dt60;
+      if (positions[i3 + 1] < -halfH) {
+        positions[i3 + 1] = halfH;
+        positions[i3] = (Math.random() - 0.5) * STAGE_W * 1.5;
+      }
+      continue;
+    }
+
+    if (scattering) {
+      // 炸散：径向速度 + 阻尼 + 大噪声
+      positions[i3] += vels[i3];
+      positions[i3 + 1] += vels[i3 + 1];
+      positions[i3 + 2] += vels[i3 + 2];
+      vels[i3] *= CONFIG.SCATTER_DAMP; vels[i3 + 1] *= CONFIG.SCATTER_DAMP; vels[i3 + 2] *= CONFIG.SCATTER_DAMP;
+    } else {
+      // spring 收敛到目标点，叠加残余速度与低频噪声
+      positions[i3] += (targets[i3] - positions[i3]) * k * dt60 + vels[i3];
+      positions[i3 + 1] += (targets[i3 + 1] - positions[i3 + 1]) * k * dt60 + vels[i3 + 1];
+      positions[i3 + 2] += (targets[i3 + 2] - positions[i3 + 2]) * k * dt60 + vels[i3 + 2];
+      vels[i3] *= 0.9; vels[i3 + 1] *= 0.9; vels[i3 + 2] *= 0.9;
+    }
+
+    if (noiseAmp > 0) {
+      positions[i3] += Math.sin(t * 0.0011 + seeds[i3]) * noiseAmp * 0.12 * dt60;
+      positions[i3 + 1] += Math.sin(t * 0.0009 + seeds[i3 + 1]) * noiseAmp * 0.12 * dt60;
+      positions[i3 + 2] += Math.sin(t * 0.0013 + seeds[i3 + 2]) * noiseAmp * 0.08 * dt60;
+    }
+  }
+
+  geometry.setDrawRange(0, drawCount());
+  geometry.attributes.position.needsUpdate = true;
+}
+
+/* —— 画中画：VideoTexture 圆形裁剪，直接画进 WebGL，保证能录进视频 —— */
+let pipMesh, pipGlowA, pipGlowB, pipRing, pipTexture;
+function initPip(video) {
+  pipTexture = new THREE.VideoTexture(video);
+  pipTexture.minFilter = THREE.LinearFilter;
+  pipTexture.magFilter = THREE.LinearFilter;
+  pipTexture.generateMipmaps = false;
+  // 从 16:9 画面中取中间正方形区域，并水平镜像（照镜子手感）
+  pipTexture.wrapS = pipTexture.wrapT = THREE.ClampToEdgeWrapping;
+  pipTexture.repeat.set(-9 / 16, 1);
+  pipTexture.offset.set(1 - (7 / 32), 0);
+
+  const r = CONFIG.PIP.DIAMETER / 2;
+  const cx = CONFIG.WIDTH / 2 - CONFIG.PIP.MARGIN - r;
+  const cy = -CONFIG.HEIGHT / 2 + CONFIG.PIP.MARGIN + r;
+
+  pipGlowA = new THREE.Mesh(new THREE.CircleGeometry(r + 16, 64), new THREE.MeshBasicMaterial({ color: 0xffcf7a, transparent: true, opacity: 0.10 }));
+  pipGlowB = new THREE.Mesh(new THREE.CircleGeometry(r + 7, 64), new THREE.MeshBasicMaterial({ color: 0xffcf7a, transparent: true, opacity: 0.30 }));
+  pipRing = new THREE.Mesh(new THREE.CircleGeometry(r + 3, 64), new THREE.MeshBasicMaterial({ color: 0xffcf7a }));
+  pipMesh = new THREE.Mesh(new THREE.CircleGeometry(r, 64), new THREE.MeshBasicMaterial({ map: pipTexture }));
+  for (const m of [pipGlowA, pipGlowB, pipRing, pipMesh]) {
+    m.position.set(cx, cy, 0);
+    pipScene.add(m);
+  }
+  pipGlowA.position.z = -3; pipGlowB.position.z = -2; pipRing.position.z = -1; pipMesh.position.z = 0;
+}
+function setPipVisible(v) { pipScene.visible = v; }
+
+/* —— 倒计时数字（画在 canvas 内，因此会被录进成片，作为开场节奏） —— */
+let cdMesh, cdTexture, cdCanvas, cdCtx;
+function initCountdown() {
+  cdCanvas = document.createElement('canvas');
+  cdCanvas.width = cdCanvas.height = 512;
+  cdCtx = cdCanvas.getContext('2d');
+  cdTexture = new THREE.CanvasTexture(cdCanvas);
+  cdMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(560, 560),
+    new THREE.MeshBasicMaterial({ map: cdTexture, transparent: true, opacity: 0, depthTest: false })
+  );
+  cdMesh.position.z = 10;
+  hudScene.add(cdMesh);
+}
+function drawCountdown(text, progress) {
+  // progress 0→1：数字放大并淡出
+  cdCtx.clearRect(0, 0, 512, 512);
+  cdCtx.save();
+  cdCtx.font = `700 300px ${CONFIG.FONT_STACK}`;
+  cdCtx.textAlign = 'center'; cdCtx.textBaseline = 'middle';
+  cdCtx.fillStyle = 'rgba(255, 207, 122, 0.92)';
+  cdCtx.shadowColor = 'rgba(255, 190, 90, 0.85)';
+  cdCtx.shadowBlur = 40;
+  cdCtx.fillText(text, 256, 256);
+  cdCtx.restore();
+  cdTexture.needsUpdate = true;
+  const s = 0.7 + progress * 0.55;
+  cdMesh.scale.set(s, s, 1);
+  cdMesh.material.opacity = progress < 0.18 ? progress / 0.18 : (1 - Math.pow((progress - 0.18) / 0.82, 2)) * 0.95;
+}
+function setCountdownVisible(v) { cdMesh.visible = v; cdMesh.material.opacity = v ? cdMesh.material.opacity : 0; }
+
+/* ============================================================================
+ * 6. 手势识别（MediaPipe HandLandmarker）
+ * ==========================================================================*/
+const video = $('cam');
+let landmarker = null;
+let lastVideoTime = -1, lastDetectAt = 0;
+let palm = { x: 0.5, y: 0.5, vx: 0, has: false };
+let lastSwipeAt = 0;
+let curScore = 0;
+
+/* 进度条：pct < 0 表示总大小未知，只显示已下载量 */
+function showLoad(on) { $('loadWrap').classList.toggle('hidden', !on); }
+function setLoad(label, pct, got, total) {
+  $('loadBar').style.width = (pct < 0 ? 0 : Math.max(0, Math.min(1, pct)) * 100) + '%';
+  $('loadTip').textContent = label +
+    (total ? '　' + (got / 1048576).toFixed(1) + ' / ' + (total / 1048576).toFixed(1) + ' MB' : '');
+}
+
+/* 带进度的预下载：公网首访要下 16MB，不能让用户干等 */
+async function preloadWithProgress(url, label) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(label + ' 下载失败（HTTP ' + res.status + '）');
+  const total = Number(res.headers.get('content-length')) || 0;
+  setLoad(label, total ? 0 : -1, 0, total);
+  if (!res.body) {
+    const buf = await res.arrayBuffer();
+    setLoad(label, 1, buf.byteLength, buf.byteLength);
+    return new Uint8Array(buf);
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    setLoad(label, total ? got / total : -1, got, total);
+  }
+  const all = new Uint8Array(got);
+  let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.length; }
+  setLoad(label, 1, got, total);
+  return all;
+}
+
+async function initHandLandmarker() {
+  const cdn = CONFIG.USE_CDN_FALLBACK;
+  const modelUrl = cdn ? CONFIG.CDN.model : './vendor/hand_landmarker.task';
+  const wasmUrl = cdn
+    ? String(CONFIG.CDN.wasm).replace(/\/+$/, '') + '/vision_wasm_internal.wasm'
+    : './vendor/vision_wasm_internal.wasm';
+
+  showLoad(true);
+  try {
+    // 模型直接读进内存交给 MediaPipe，进度 100% 可信；wasm 只做预热，让它落进 HTTP 缓存
+    const modelBuf = await preloadWithProgress(modelUrl, '手势模型');
+    await preloadWithProgress(wasmUrl, '识别引擎');
+    setLoad('正在启动识别', 1, 0, 0);
+
+    const fileset = await FilesetResolver.forVisionTasks(cdn ? CONFIG.CDN.wasm : './vendor');
+    landmarker = await HandLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetBuffer: modelBuf,
+        delegate: CONFIG.USE_GPU_DELEGATE ? 'GPU' : 'CPU',
+      },
+      numHands: 1,
+      runningMode: 'VIDEO',
+      minHandDetectionConfidence: 0.5,
+      minHandPresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+  } finally {
+    showLoad(false);
+  }
+}
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('浏览器不支持摄像头接口，请使用 Chrome 或 Edge 打开。');
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false,
+  });
+  video.srcObject = stream;
+  await video.play();
+}
+
+// 三点距离
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
+
+function detectGesture(now) {
+  if (!landmarker || video.readyState < 2) return;
+  if (now - lastDetectAt < CONFIG.GESTURE.DETECT_INTERVAL) return;
+  if (video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  lastDetectAt = now;
+
+  let res;
+  try {
+    res = landmarker.detectForVideo(video, now);
+  } catch (e) { return; }
+
+  const has = res && res.landmarks && res.landmarks.length > 0;
+  if (!has) { applyGesture('NONE', 0, now); return; }
+
+  const lm = res.landmarks[0];
+  const score = (res.handednesses && res.handednesses[0] && res.handednesses[0][0])
+    ? res.handednesses[0][0].score : (res.handedness && res.handedness[0] ? res.handedness[0].score : 0);
+  curScore = score;
+
+  // 置信度过滤：低于阈值本帧不更新任何状态，沿用上一帧
+  if (score < CONFIG.GESTURE.SCORE_MIN) return;
+
+  // 掌宽 = 食指掌指关节(5) 到 小指掌指关节(17)；除以掌宽消除远近影响
+  const palmW = Math.max(1e-4, dist(lm[5], lm[17]));
+  const tips = [4, 8, 12, 16, 20];
+  const palmCenter = { x: (lm[0].x + lm[5].x + lm[9].x + lm[13].x + lm[17].x) / 5, y: (lm[0].y + lm[5].y + lm[9].y + lm[13].y + lm[17].y) / 5 };
+  let sum = 0;
+  for (const t of tips) sum += dist(lm[t], palmCenter);
+  const openness = (sum / tips.length) / palmW;
+  const pinch = dist(lm[4], lm[8]) / palmW;
+
+  // 掌心 x 速度（镜像：手向右 → 画面 x 增大）
+  const mx = 1 - palmCenter.x;
+  if (palm.has) palm.vx = palm.vx * (1 - CONFIG.GESTURE.VX_SMOOTH) + (mx - palm.x) * CONFIG.GESTURE.VX_SMOOTH;
+  else palm.vx = 0;
+  palm.x = mx; palm.y = palmCenter.y; palm.has = true;
+
+  let g = 'NONE';
+  if (pinch < CONFIG.GESTURE.PINCH) g = 'PINCH';
+  else if (openness > CONFIG.GESTURE.OPEN) g = 'OPEN';
+  else if (openness < CONFIG.GESTURE.FIST) g = 'FIST';
+
+  // 校准用：每 600ms 打印一次手势原始参数，阈值不合适时对照调 CONFIG.GESTURE
+  if (now - (detectGesture._printAt || 0) > 600) {
+    detectGesture._printAt = now;
+    console.log(`[手势] openness=${openness.toFixed(2)} pinch=${pinch.toFixed(2)} palmVX=${palm.vx.toFixed(3)} score=${score.toFixed(2)}`);
+  }
+
+  applyGesture(g, score, now);
+}
+
+let lastPalmX = null;
+function applyGesture(g, score, now) {
+  const G = CONFIG.GESTURE;
+
+  // 状态机：任何状态切换需持续 HOLD_MS 才生效，防抖动误触
+  if (g !== state.gesture) {
+    if (state.pending !== g) { state.pending = g; state.pendingSince = now; }
+    else if (now - state.pendingSince >= G.HOLD_MS) {
+      const prev = state.gesture;
+      state.gesture = g;
+      state.pending = 'NONE'; state.pendingSince = 0;
+      if (g === 'OPEN' && prev !== 'OPEN') scatterImpulse(); // 进入炸散给一次冲量
+    }
+  } else { state.pending = 'NONE'; state.pendingSince = 0; }
+
+  if (g !== 'NONE') {
+    state.gestureScore = score;
+    state.lastGestureAt = now;
+
+    // 捏合状态：甩手切换造型 / 慢速移动整体旋转
+    if (g === 'PINCH') {
+      if (Math.abs(palm.vx) > G.SWIPE_VX && now - lastSwipeAt > G.SWIPE_COOLDOWN) {
+        lastSwipeAt = now;
+        gotoShape(palm.vx > 0 ? 1 : -1);
+      } else if (lastPalmX !== null) {
+        const dx = (palm.x - lastPalmX) * 100; // 换算成"画面百分比"
+        driftYaw += dx * CONFIG.ROTATE_SPEED; // 捏合拖动 → 整体旋转
+      }
+    }
+  }
+  lastPalmX = palm.x;
+}
+
+/* ============================================================================
+ * 7. HUD
+ * ==========================================================================*/
+const GESTURE_CN = { NONE: '未检测到', OPEN: '张开五指 · 炸散', FIST: '握拳 · 聚合', PINCH: '捏合 · 旋转/甩手' };
+let lastHudAt = 0;
+function updateHud() {
+  $('hShape').textContent = `${state.shapeIndex + 1}/${CONFIG.SHAPES.length} ${CONFIG.SHAPES[state.shapeIndex]}`;
+  $('hNext').textContent = CONFIG.SHAPES[(state.shapeIndex + 1) % CONFIG.SHAPES.length];
+}
+function updateHudLive(fps) {
+  $('hGesture').textContent = GESTURE_CN[state.gesture] || '未检测到';
+  $('hScore').textContent = state.gesture === 'NONE' ? '—' : (state.gestureScore * 100).toFixed(0) + '%';
+  $('hFps').textContent = fps.toFixed(0);
+  $('hCount').textContent = drawCount().toLocaleString();
+}
+
+// 文案输入：300ms 防抖，避免打字过程中粒子疯狂重排
+let textTimer = null;
+function onTextChanged() {
+  clearTimeout(textTimer);
+  textTimer = setTimeout(() => {
+    mainText = $('inMain').value.trim() || '中秋快乐';
+    signText = $('inSign').value.trim();
+    if (CONFIG.SHAPES[state.shapeIndex] === '祝福文字') assignTargets();
+  }, CONFIG.TEXT_DEBOUNCE);
+}
+
+/* ============================================================================
+ * 8. 录制
+ * ==========================================================================*/
+let recorder = null, chunks = [], recStartedAt = 0, recTimer = null, recMime = '';
+
+function pickMime() {
+  if (typeof MediaRecorder === 'undefined') return null;
+  for (const m of CONFIG.MIME_CHAIN) {
+    if (MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return '';
+}
+
+function startRecorder() {
+  const mime = pickMime();
+  if (mime === null) { alert('当前浏览器不支持 MediaRecorder，无法录制。请使用 Chrome 或 Edge。'); return; }
+  const stream = canvas.captureStream(CONFIG.RECORD.FPS);
+  const opts = { videoBitsPerSecond: CONFIG.RECORD.BITRATE };
+  if (mime) opts.mimeType = mime;
+  recMime = mime || '';
+  let rec;
+  try { rec = new MediaRecorder(stream, opts); }
+  catch (e) { try { rec = new MediaRecorder(stream); recMime = ''; } catch (e2) { alert('录制初始化失败：' + e2.message); return; } }
+  recorder = rec;
+  chunks = [];
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => finishRecording();
+  recorder.start(200);
+  recStartedAt = performance.now();
+  state.phase = 'recording';
+  clearTimeout(recTimer);
+  recTimer = setTimeout(() => stopRecorder(), CONFIG.RECORD.MAX_MS);
+}
+
+function stopRecorder() {
+  clearTimeout(recTimer);
+  if (recorder && recorder.state !== 'inactive') recorder.stop();
+  else finishRecording();
+}
+
+function finishRecording() {
+  state.phase = 'idle';
+  $('panel').classList.remove('fade');
+  const type = recMime && recMime.indexOf('webm') >= 0 ? 'video/webm' : 'video/mp4';
+  const blob = new Blob(chunks, { type });
+  chunks = [];
+  // 空文件兜底：iOS Safari 上 captureStream 常失败，会给出一个几乎为空的 blob
+  if (!blob.size) {
+    alert(IS_IOS
+      ? '未捕获到画面。iPhone 的 Safari 对画面录制支持不完整，请换安卓 Chrome 或电脑录制。'
+      : '未捕获到画面，请重试一次。');
+    return;
+  }
+
+  const url = URL.createObjectURL(blob);
+  const pv = $('pvVideo');
+  pv.src = url; pv.loop = true; pv.muted = true; pv.play().catch(() => {});
+
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+  const ext = type === 'video/webm' ? 'webm' : 'mp4';
+  const filename = `中秋祝福_${stamp}.${ext}`;
+
+  const mb = (blob.size / 1048576).toFixed(1);
+  $('pvInfo').innerHTML = blob.size < 20000
+    ? '本次只捕获到极少画面' + (IS_IOS ? '（iPhone Safari 的已知限制）' : '') + '，请重试一次；仍失败请换 Chrome / Edge。'
+    : (type === 'video/webm'
+      ? `已生成 WebM（1080×1920，约 ${mb} MB）。微信可直接发送，或用剪映转 MP4。`
+      : `已生成 MP4（1080×1920，约 ${mb} MB）。可直接发微信。`);
+
+  $('btnSave').onclick = () => {
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  $('btnAgain').onclick = () => {
+    URL.revokeObjectURL(url);
+    $('preview').classList.add('hidden');
+    beginCountdown();
+  };
+  $('preview').classList.remove('hidden');
+}
+
+/* 倒计时：HUD 淡出 → canvas 内 3/2/1 → 自动开录 */
+let cdIndex = 0, cdStart = 0, cdRaf = null;
+function beginCountdown() {
+  $('panel').classList.add('fade');
+  setTimeout(() => {
+    state.phase = 'countdown';
+    cdIndex = 0; cdStart = performance.now();
+    setCountdownVisible(true);
+    runCountdown();
+  }, CONFIG.RECORD.HUD_FADE);
+}
+function runCountdown() {
+  cancelAnimationFrame(cdRaf);
+  const step = () => {
+    const now = performance.now();
+    if (state.phase !== 'countdown') { setCountdownVisible(false); return; }
+    const elapsed = now - cdStart;
+    const idx = Math.floor(elapsed / CONFIG.RECORD.COUNTDOWN_STEP);
+    if (idx >= CONFIG.RECORD.COUNTDOWN.length) {
+      setCountdownVisible(false);
+      startRecorder();
+      return;
+    }
+    const p = (elapsed % CONFIG.RECORD.COUNTDOWN_STEP) / CONFIG.RECORD.COUNTDOWN_STEP;
+    drawCountdown(String(CONFIG.RECORD.COUNTDOWN[idx]), p);
+    cdRaf = requestAnimationFrame(step);
+  };
+  cdRaf = requestAnimationFrame(step);
+}
+function cancelCountdown() {
+  state.phase = 'idle';
+  cancelAnimationFrame(cdRaf);
+  setCountdownVisible(false);
+  $('panel').classList.remove('fade');
+}
+
+/* ============================================================================
+ * 9. 主循环
+ * ==========================================================================*/
+let lastFrameAt = performance.now();
+let fpsAvg = 60, lowFpsSince = 0, benchFrames = 0, benchStart = 0, benching = true;
+
+function loop() {
+  requestAnimationFrame(loop);
+  const now = performance.now();
+  const dt = Math.min(64, now - lastFrameAt);
+  lastFrameAt = now;
+
+  detectGesture(now);
+
+  // 兜底：长时间无有效手势 → 自动推进造型（录制中锁住最后一个造型以保证收尾）
+  const idleTooLong = now - state.lastGestureAt > CONFIG.GESTURE.IDLE_MS;
+  if (idleTooLong) {
+    const isLast = state.shapeIndex === CONFIG.SHAPES.length - 1;
+    if (!(CONFIG.LOCK_LAST_SHAPE_WHILE_RECORD && state.phase === 'recording' && isLast)) {
+      state.lastGestureAt = now;
+      gotoShape(1);
+    }
+  }
+  // 检测不到手：保持当前态并缓慢自转
+  if (state.gesture === 'NONE' && state.phase !== 'recording') points.rotation.y += 0.0012;
+
+  updateParticles(dt, now);
+
+  renderer.clear();
+  renderer.render(bgScene, bgCam);
+  renderer.render(scene, camera);
+  renderer.clearDepth();
+  renderer.render(pipScene, orthoCam);
+  renderer.render(hudScene, orthoCam);
+
+  // 帧率统计 / 自动降级
+  const fps = 1000 / Math.max(1, dt);
+  fpsAvg = fpsAvg * 0.92 + fps * 0.08;
+  if (benching) {
+    benchFrames++;
+    if (now - benchStart >= CONFIG.BENCH_MS) {
+      benching = false;
+      const bf = (benchFrames * 1000) / (now - benchStart);
+      if (bf < CONFIG.BENCH_PASS_FPS) degradeStep = CONFIG.DEGRADE_STEPS.length - 1;
+      localStorage.setItem('moonlab.degrade', String(degradeStep));
+    }
+  } else {
+    if (fpsAvg < CONFIG.FPS_FLOOR) {
+      if (!lowFpsSince) lowFpsSince = now;
+      else if (now - lowFpsSince > CONFIG.FPS_DEGRADE_WINDOW && degradeStep < CONFIG.DEGRADE_STEPS.length - 1) {
+        degradeStep++; lowFpsSince = 0;
+      }
+    } else lowFpsSince = 0;
+  }
+
+  if (now - lastHudAt > 200) { lastHudAt = now; updateHudLive(fpsAvg); }
+}
+
+/* ============================================================================
+ * 10. 启动流程
+ * ==========================================================================*/
+async function boot() {
+  // 环境检查
+  if (!window.WebGLRenderingContext || !document.createElement('canvas').getContext('webgl2')) {
+    fatal('浏览器不支持 WebGL', '<p>请更新到最新版 <b>Chrome</b> 或 <b>Edge</b> 浏览器后重试。</p>');
+    return;
+  }
+
+  const missing = await checkVendor();
+  if (missing.length) {
+    if (!CONFIG.USE_CDN_FALLBACK) {
+      fatal('缺少本地库文件', `
+        <p>以下文件未找到（应用已本地化，断网也能运行）：</p>
+        <ul>${missing.map((f) => '<li><code>' + f + '</code></li>').join('')}</ul>
+        <p>请<b>双击运行 <code>fetch_libs.bat</code></b> 下载第三方库，然后重新双击 <code>start.bat</code>。</p>`);
+      return;
+    }
+  }
+
+  try {
+    await loadLibs(!missing.length ? false : CONFIG.USE_CDN_FALLBACK);
+  } catch (e) {
+    fatal('第三方库加载失败', '<p>' + e.message + '</p><p>请双击 <code>fetch_libs.bat</code> 重新下载。</p>');
+    return;
+  }
+
+  initThree();
+  const firstRun = localStorage.getItem('moonlab.benchDone') !== '1';
+  const savedScale = Number(localStorage.getItem('moonlab.baseScale'));
+  buildParticles(IS_MOBILE ? CONFIG.MOBILE_HIGH : CONFIG.PARTICLES_HIGH);
+  initCountdown();
+  updateHud();
+
+  // 手机端：控制台默认收起，把画面留给舞台；点按钮可展开 / 收起
+  const panel = $('panel');
+  if (IS_MOBILE) panel.classList.add('collapsed');
+  $('btnToggle').onclick = () => {
+    const on = panel.classList.toggle('collapsed');
+    $('btnToggle').textContent = on ? '展开控制台' : '收起控制台';
+  };
+
+  // iPhone 的 Safari 对 canvas 录制支持不完整，提前讲清楚，别等录完才发现是黑的
+  if (IS_IOS) {
+    const p = document.createElement('p');
+    p.className = 'privacy';
+    p.style.color = '#e0a24a';
+    p.innerHTML = '提示：iPhone 上的 Safari 对画面录制支持不完整，手势互动可以正常玩，但<b>要录成片请换安卓 Chrome 或电脑</b>。';
+    $('boot').querySelector('.card').appendChild(p);
+  }
+
+  $('btnStart').onclick = async () => {
+    $('bootErr').textContent = '正在启动摄像头…';
+    try {
+      await startCamera();
+    } catch (e) {
+      $('bootErr').innerHTML = '无法访问摄像头：' + (e && e.message ? e.message : e) +
+        '<br />请检查：① 浏览器地址栏的摄像头权限是否允许；② 是否被会议软件等其它程序占用。';
+      return;
+    }
+    try {
+      $('bootErr').textContent = '正在加载手势模型…';
+      await initHandLandmarker();
+    } catch (e) {
+      $('bootErr').innerHTML = '手势模型加载失败：' + (e && e.message ? e.message : e) +
+        '<br />请确认 <code>vendor/hand_landmarker.task</code> 存在，或重跑 <code>fetch_libs.bat</code>。';
+      return;
+    }
+
+    initPip(video);
+    setPipVisible(CONFIG.PIP.ENABLED);
+    $('boot').classList.add('hidden');
+
+    // 首次运行做压力测试，之后沿用上次结论
+    if (firstRun) {
+      benchStart = performance.now(); benchFrames = 0; benching = true;
+      localStorage.setItem('moonlab.benchDone', '1');
+    } else {
+      benching = false;
+      baseScale = Number.isFinite(savedScale) && savedScale > 0 ? clamp(savedScale, 0.2, 1) : 1;
+    }
+
+    assignTargets();
+    loop();
+  };
+
+  $('btnRec').onclick = () => { if (state.phase === 'idle') beginCountdown(); };
+  $('chkPip').onchange = (e) => setPipVisible(e.target.checked);
+  $('inMain').addEventListener('input', onTextChanged);
+  $('inSign').addEventListener('input', onTextChanged);
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (state.phase === 'countdown') cancelCountdown();
+    else if (state.phase === 'recording') stopRecorder();
+  });
+}
+
+/* 公网环境注册 Service Worker：缓存 19MB 依赖，二次访问秒开。
+ * 本地 127.0.0.1 不注册——否则改了代码被旧缓存挡住，调试会很痛苦。 */
+const IS_LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+if ('serviceWorker' in navigator && !IS_LOCAL_HOST) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+
+boot();
+</script>
+</body>
+</html>
